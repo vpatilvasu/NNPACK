@@ -101,6 +101,7 @@ LOCAL_STATIC_LIBRARIES := nnpack
 include $(BUILD_STATIC_LIBRARY)
 
 include $(CLEAR_VARS)
+
 LOCAL_MODULE := fp16_utils
 LOCAL_SRC_FILES := $(LOCAL_PATH)/test/fp16/values.cc
 LOCAL_CFLAGS := -D__STDINT_MACROS
@@ -130,6 +131,12 @@ LOCAL_SRC_FILES := $(LOCAL_PATH)/test/fp16/fp32-to-ieee-value.cc
 LOCAL_CFLAGS := -D__STDINT_MACROS
 LOCAL_C_INCLUDES := $(LOCAL_PATH)/include
 LOCAL_STATIC_LIBRARIES := fp16_utils gtest
+
+LOCAL_MODULE := bench-convolution-test
+LOCAL_SRC_FILES := $(LOCAL_PATH)/bench/convolution.cpp
+LOCAL_C_INCLUDES := $(LOCAL_PATH)/include $(LOCAL_PATH)/include/nnpack
+LOCAL_STATIC_LIBRARIES := nnpack nnpack_reference
+
 include $(BUILD_EXECUTABLE)
 
 include $(CLEAR_VARS)
