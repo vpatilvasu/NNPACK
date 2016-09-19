@@ -322,7 +322,16 @@ enum nnp_status nnp_convolution_kernel_gradient(
  * @param[out] profile An optional pointer to profiling structure.
  *                     If provided, the structure would record time spent in different phases of the computation.
  */
-enum nnp_status nnp_convolution_inference(
+size_t calc_scratch_memory_size(
+        enum nnp_convolution_algorithm algorithm,
+        size_t input_channels,
+        size_t output_channels,
+        struct nnp_size input_size,
+        struct nnp_padding input_padding,
+        struct nnp_size kernel_size,
+        struct nnp_size output_subsampling );
+
+enum nnp_status nnp_convolution_inference_mem(
 	enum nnp_convolution_algorithm algorithm,
 	enum nnp_convolution_transform_strategy transform_strategy,
 	size_t input_channels,
@@ -335,8 +344,25 @@ enum nnp_status nnp_convolution_inference(
 	const float kernel[],
 	const float bias[],
 	float output[],
-	pthreadpool_t threadpool,
+        float scratch_memory[],
+        pthreadpool_t threadpool,
 	struct nnp_profile* profile);
+
+enum nnp_status nnp_convolution_inference(
+        enum nnp_convolution_algorithm algorithm,
+        enum nnp_convolution_transform_strategy transform_strategy,
+        size_t input_channels,
+        size_t output_channels,
+        struct nnp_size input_size,
+        struct nnp_padding input_padding,
+        struct nnp_size kernel_size,
+        struct nnp_size output_subsampling,
+        const float input[],
+        const float kernel[],
+        const float bias[],
+        float output[],
+        pthreadpool_t threadpool,
+        struct nnp_profile* profile);
 
 /**
  * @brief Computes output of a fully connected layer from input and kernel matrices.

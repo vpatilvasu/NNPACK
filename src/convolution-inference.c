@@ -427,6 +427,7 @@ static enum nnp_status compute_fast_convolution_inference(
 	const nnp_transform_2d input_transform_function,
 	const nnp_transform_2d kernel_transform_function,
 	const nnp_transform_2d_with_bias output_transform_function,
+        void* memory_block,
 	pthreadpool_t threadpool,
 	struct nnp_profile* profile)
 {
@@ -471,10 +472,9 @@ static enum nnp_status compute_fast_convolution_inference(
 	const size_t output_transform_size = tiles_count * output_channels * transform_tile_size;
 	const size_t memory_size = input_transform_size + kernel_transform_size + output_transform_size;
 
-	void* memory_block = allocate_memory(memory_size);
 	if (memory_block == NULL) {
-		status = nnp_status_out_of_memory;
-		goto cleanup;
+            status = nnp_status_out_of_memory;
+            return status;
 	}
 
 	float* input_transform = memory_block;
@@ -602,8 +602,6 @@ static enum nnp_status compute_fast_convolution_inference(
 			break;
 	}
 
-cleanup:
-	release_memory(memory_block, memory_size);
 	return status;
 }
 
@@ -654,7 +652,7 @@ static enum nnp_status compute_direct_convolution_inference(
 	void* memory_block = allocate_memory(memory_size);
 	if (memory_block == NULL) {
 		status = nnp_status_out_of_memory;
-		goto cleanup;
+                goto cleanup;
 	}
 
 	float* packed_input = memory_block;
@@ -737,14 +735,96 @@ static enum nnp_status compute_direct_convolution_inference(
 			output[output_channel * output_image_size + index] += bias_value;
 		}
 	}
-	NNP_OUTPUT_TRANSFORM_END(profile)
+        NNP_OUTPUT_TRANSFORM_END(profile)
 
 cleanup:
-	release_memory(memory_block, memory_size);
+        release_memory(memory_block, memory_size);
 	return status;
 }
 
-enum nnp_status nnp_convolution_inference(
+size_t calc_scratch_memory_size(
+        enum nnp_convolution_algorithm algorithm,
+        size_t input_channels,
+        size_t output_channels,
+        struct nnp_size input_size,
+        struct nnp_padding input_padding,
+        struct nnp_size kernel_size,
+        struct nnp_size output_subsampling )
+{
+    const struct nnp_size output_size = {
+            .width = (input_padding.left + input_size.width + input_padding.right - kernel_size.width) / output_subsampling.width + 1,
+            .height = (input_padding.top + input_size.height + input_padding.bottom - kernel_size.height) / output_subsampling.height + 1
+    };
+
+    struct nnp_size tile_size;
+    bool fourier_transform;
+    switch (algorithm) {
+            case nnp_convolution_algorithm_wt8x8:
+                    if ((kernel_size.height != 3) || (kernel_size.width != 3)) {
+                            return 0;
+                    }
+                    tile_size = (struct nnp_size) { .height = 8, .width = 8 };
+                    fourier_transform = false;
+                    break;
+            case nnp_convolution_algorithm_ft8x8:
+                    tile_size = (struct nnp_size) { .height = 8, .width = 8 };
+                    fourier_transform = true;
+                    break;
+            case nnp_convolution_algorithm_ft16x16:
+                    tile_size = (struct nnp_size) { .height = 16, .width = 16 };
+                    fourier_transform = true;
+                    break;
+            case nnp_convolution_algorithm_implicit_gemm:
+                    break;
+            case nnp_convolution_algorithm_auto:
+                    NNP_UNREACHABLE;
+            default:
+                    return 0;
+    }
+
+    const size_t simd_width = nnp_hwinfo.simd_width;
+    const size_t tuple_elements = (fourier_transform ? simd_width * 2 : simd_width);
+    const size_t tile_elements = tile_size.height * tile_size.width;
+
+    const struct nnp_size input_tile = {
+            .width = tile_size.width,
+            .height = tile_size.height
+    };
+
+    const struct nnp_size output_tile = {
+            .width = input_tile.width - kernel_size.width + 1,
+            .height = input_tile.height - kernel_size.height + 1
+    };
+
+    const size_t tiles_y_count = divide_round_up(output_size.height, output_tile.height);
+    const size_t tiles_x_count = divide_round_up(output_size.width, output_tile.width);
+    const size_t tiles_count = tiles_x_count * tiles_y_count;
+
+    /* Calculate cache blocking parameters */
+    const size_t cache_elements_l1 = nnp_hwinfo.blocking.l1 / (tuple_elements * sizeof(float));
+    const size_t cache_elements_l2 = nnp_hwinfo.blocking.l2 / (tuple_elements * sizeof(float));
+    const size_t cache_elements_l3 = nnp_hwinfo.blocking.l3 / (tuple_elements * sizeof(float));
+
+    const size_t tiles_subblock_max = (fourier_transform ? nnp_hwinfo.cxgemm.mr : nnp_hwinfo.sxgemm.mr);
+    const size_t output_channels_subblock_max = (fourier_transform ? nnp_hwinfo.cxgemm.nr : nnp_hwinfo.sxgemm.nr);
+
+    const size_t input_channels_block_max =
+            round_down(cache_elements_l1 / (tiles_subblock_max + output_channels_subblock_max), 2);
+    const size_t tiles_block_max =
+            round_down(cache_elements_l2 / input_channels_block_max, tiles_subblock_max);
+    const size_t output_channels_block_max =
+            round_down(cache_elements_l3 / input_channels_block_max, output_channels_subblock_max);
+
+    const size_t transform_tile_size = tile_elements;
+    const size_t input_transform_size = tiles_count * min(input_channels, input_channels_block_max) * transform_tile_size;
+    const size_t kernel_transform_size = output_channels * min(input_channels, input_channels_block_max) * transform_tile_size;
+    const size_t output_transform_size = tiles_count * output_channels * transform_tile_size;
+    const size_t memory_size = input_transform_size + kernel_transform_size + output_transform_size;
+
+    return memory_size;
+}
+
+enum nnp_status nnp_convolution_inference_mem(
 	enum nnp_convolution_algorithm algorithm,
 	enum nnp_convolution_transform_strategy transform_strategy,
 	size_t input_channels,
@@ -757,10 +837,15 @@ enum nnp_status nnp_convolution_inference(
 	const float kernel[],
 	const float bias[],
 	float output[],
+        float scratch_memory[],
 	pthreadpool_t threadpool,
 	struct nnp_profile* profile)
 {
-	void* memory_block = NULL;
+        if( scratch_memory == NULL )
+        {
+            return nnp_status_out_of_memory;
+        }
+
 	NNP_TOTAL_START(profile)
 
 	/* Basic validation of parameters. This check detects invalid, but not unsupported parameters. */
@@ -857,7 +942,7 @@ enum nnp_status nnp_convolution_inference(
 				tile_size, input_size, input_padding, kernel_size, output_size,
 				input, kernel, bias, output,
 				input_transform_function, kernel_transform_function, output_transform_function,
-				threadpool, profile);
+                                scratch_memory, threadpool, profile);
 			break;
 		case nnp_convolution_algorithm_implicit_gemm:
 			status = compute_direct_convolution_inference(
@@ -873,4 +958,65 @@ enum nnp_status nnp_convolution_inference(
 cleanup:
 	NNP_TOTAL_END(profile)
 	return status;
+}
+
+enum nnp_status nnp_convolution_inference(
+        enum nnp_convolution_algorithm algorithm,
+        enum nnp_convolution_transform_strategy transform_strategy,
+        size_t input_channels,
+        size_t output_channels,
+        struct nnp_size input_size,
+        struct nnp_padding input_padding,
+        struct nnp_size kernel_size,
+        struct nnp_size output_subsampling,
+        const float input[],
+        const float kernel[],
+        const float bias[],
+        float output[],
+        pthreadpool_t threadpool,
+        struct nnp_profile* profile)
+{
+    enum nnp_status status = nnp_status_success;
+
+    size_t memory_size = calc_scratch_memory_size( algorithm,
+                                                   input_channels,
+                                                   output_channels,
+                                                   input_size,
+                                                   input_padding,
+                                                   kernel_size,
+                                                   output_subsampling );
+
+    memory_size *= sizeof(float);
+
+    if( memory_size == 0 )
+    {
+        return nnp_status_out_of_memory;
+    }
+
+    void* memory_block = allocate_memory(memory_size);
+    if (memory_block == NULL) {
+            status = nnp_status_out_of_memory;
+            goto cleanup;
+    }
+
+    status = nnp_convolution_inference_mem(
+                algorithm,
+                transform_strategy,
+                input_channels,
+                output_channels,
+                input_size,
+                input_padding,
+                kernel_size,
+                output_subsampling,
+                input,
+                kernel,
+                bias,
+                output,
+                memory_block,
+                threadpool,
+                profile);
+
+cleanup:
+    release_memory(memory_block, memory_size);
+    return status;
 }

@@ -370,11 +370,27 @@ int main(int argc, char** argv) {
 			break;
 	}
 
+        size_t memory_size = calc_scratch_memory_size( options.algorithm,
+                                                       input_channels,
+                                                       output_channels,
+                                                       input_size,
+                                                       input_padding,
+                                                       kernel_size,
+                                                       output_subsampling );
+
+        printf("Scratch memory size: %d bytes\n", memory_size * sizeof(float));
+
+        if( memory_size == 0 )
+        {
+            return nnp_status_out_of_memory;
+        }
+
 	vector<float> input(batch_size * input_channels * input_size.width * input_size.height);
 	vector<float> kernel(input_channels * output_channels * kernel_size.width * kernel_size.height );
 	vector<float> output(batch_size * output_channels * output_size.width * output_size.height);
 	vector<float> referenceOutput(batch_size * output_channels * output_size.width * output_size.height);
 	vector<float> bias(output_channels);
+        vector<float> scratch_memory(memory_size);
 
 	const uint_fast32_t seed = std::chrono::system_clock::now().time_since_epoch().count();
 	auto rng = std::bind(std::uniform_real_distribution<float>(), std::mt19937(seed));
@@ -383,6 +399,7 @@ int main(int argc, char** argv) {
 	std::generate(bias.begin(), bias.end(), std::ref(rng));
 	std::fill(output.begin(), output.end(), std::nanf(""));
 	std::fill(referenceOutput.begin(), referenceOutput.end(), std::nanf(""));
+        std::fill( scratch_memory.begin(), scratch_memory.end(), 0 );
 
 	pthreadpool_t threadpool = NULL;
 	if (options.threadpool) {
@@ -399,7 +416,7 @@ int main(int argc, char** argv) {
 
 	struct nnp_profile convolution_profile;
 	enum nnp_status status = 
-	nnp_convolution_inference(
+        nnp_convolution_inference_mem(
 		options.algorithm,
 		options.transform_strategy,
 		input_channels,
@@ -412,6 +429,7 @@ int main(int argc, char** argv) {
 		kernel.data(),
 		bias.data(),
 		output.data(),
+                scratch_memory.data(),
 		threadpool,
 		&convolution_profile );	
 
